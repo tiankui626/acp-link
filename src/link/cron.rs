@@ -18,6 +18,9 @@ use super::acp::{AcpBridge, StreamEvent};
 use crate::config::CronJob;
 use crate::im::IMChannel;
 
+/// 默认时区：Asia/Shanghai（北京时间）
+const CRON_TZ: chrono_tz::Tz = chrono_tz::Asia::Shanghai;
+
 /// 消息流式更新的节流间隔（与主消息处理保持一致）
 const CRON_UPDATE_INTERVAL: Duration = Duration::from_millis(300);
 
@@ -78,7 +81,7 @@ async fn build_scheduler(
         };
 
         let job_cfg_for_closure = job_cfg.clone();
-        let job = Job::new_async(schedule.as_str(), move |_uuid, _lock| {
+        let job = Job::new_async_tz(schedule.as_str(), CRON_TZ, move |_uuid, _lock| {
             let bridge = bridge.clone();
             let channel = channel.clone();
             let cwd = cwd.clone();

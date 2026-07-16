@@ -28,3 +28,4 @@ base64 = "0.22.1"
 axum = "0.8"
 uuid = { version = "1.23.0", features = ["v4"] }
 tokio-cron-scheduler = { version = "0.15.1", features = ["signal"] }
+chrono-tz = "0.10"
