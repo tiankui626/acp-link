@@ -484,7 +484,11 @@ impl FeishuClient {
                     // 群聊须 @机器人：用 mention 的 open_id 与机器人自身 open_id 比对。
                     // 不能用「mention 无 user_id」判定——应用未申请通讯录(user_id)权限时，
                     // 普通用户的 mention 同样没有 user_id，会被误判为 @机器人。
+                    // 例外：如果消息在话题（thread）内（root_id 非空），则无需 @机器人，
+                    // 允许话题内的自由对话。
+                    let in_thread = raw_msg.root_id.as_ref().map_or(false, |s| !s.is_empty());
                     if raw_msg.chat_type == "group"
+                        && !in_thread
                         && !mentions_bot(&raw_msg.mentions, &bot_open_id)
                     {
                         tracing::debug!(
