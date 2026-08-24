@@ -141,11 +141,25 @@ impl LinkService {
         let (tx, mut rx) = tokio::sync::mpsc::channel(32);
         let channel_clone = self.state.channel.clone();
         tokio::spawn(async move {
+            let mut backoff_secs: u64 = 1;
+            const MAX_BACKOFF: u64 = 120; // 最大 2 分钟
             loop {
-                if let Err(e) = channel_clone.listen(tx.clone()).await {
-                    tracing::error!("WS error: {e}, reconnecting...");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                let start = std::time::Instant::now();
+                match channel_clone.listen(tx.clone()).await {
+                    Ok(()) => {
+                        tracing::warn!("WS 连接断开，{backoff_secs}s 后重连...");
+                    }
+                    Err(e) => {
+                        tracing::error!("WS error: {e}, {backoff_secs}s 后重连...");
+                    }
                 }
+                // 如果连接持续超过 60s，说明之前是正常运行的，重置退避
+                if start.elapsed() > Duration::from_secs(60) {
+                    backoff_secs = 1;
+                }
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                tracing::info!("WS 正在重连... (下次退避 {backoff_secs}s)");
             }
         });
 
