@@ -512,12 +512,18 @@ impl FeishuClient {
                             }
                             None => continue,
                         },
-                        "post" => {
-                            tracing::debug!("飞书 WS: 不支持的消息类型 'post'");
-                            MessageContent::Unsupported {
-                                message_type: "post".to_string(),
-                                raw_content: raw_msg.content.clone(),
+                        "post" => match parse_post_content(&raw_msg.content) {
+                            Some(t) => {
+                                let t = strip_at_placeholders(&t);
+                                let t = t.trim().to_string();
+                                if t.is_empty() { continue; }
+                                if is_feishu_link(&t) {
+                                    MessageContent::Link { url: t }
+                                } else {
+                                    MessageContent::Text(t)
+                                }
                             }
+                            None => continue,
                         }
                         "image"   => parse_image_content(&raw_msg.content),
                         "file"    => parse_file_content(&raw_msg.content),
@@ -1394,6 +1400,67 @@ fn parse_text_content(content: &str) -> Option<String> {
         .and_then(|t| t.as_str())
         .filter(|s| !s.is_empty())
         .map(String::from)
+}
+
+/// 解析 post（富文本）消息，提取纯文本内容
+///
+/// 飞书 post 消息格式：
+/// ```json
+/// {"zh_cn": {"title": "...", "content": [[{"tag":"text","text":"..."}, ...], ...]}}
+/// ```
+/// 遍历所有段落和元素，提取 text/a 标签的文本，at 标签的用户名，段落间用换行分隔。
+fn parse_post_content(content: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+
+    // post 内容按语言存储，优先 zh_cn，否则取第一个
+    let locale_obj = v.get("zh_cn")
+        .or_else(|| v.get("en_us"))
+        .or_else(|| v.as_object().and_then(|m| m.values().next()))?;
+
+    let title = locale_obj.get("title").and_then(|t| t.as_str()).unwrap_or("");
+    let paragraphs = locale_obj.get("content").and_then(|c| c.as_array())?;
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if !title.is_empty() {
+        parts.push(title.to_string());
+    }
+
+    for para in paragraphs {
+        let elements = match para.as_array() {
+            Some(arr) => arr,
+            None => continue,
+        };
+        let mut line = String::new();
+        for elem in elements {
+            let tag = elem.get("tag").and_then(|t| t.as_str()).unwrap_or("");
+            match tag {
+                "text" => {
+                    if let Some(text) = elem.get("text").and_then(|t| t.as_str()) {
+                        line.push_str(text);
+                    }
+                }
+                "a" => {
+                    if let Some(text) = elem.get("text").and_then(|t| t.as_str()) {
+                        line.push_str(text);
+                    }
+                }
+                "at" => {
+                    if let Some(name) = elem.get("user_name").and_then(|t| t.as_str()) {
+                        line.push('@');
+                        line.push_str(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !line.is_empty() {
+            parts.push(line);
+        }
+    }
+
+    let result = parts.join("\n");
+    if result.is_empty() { None } else { Some(result) }
 }
 
 /// 判断文本是否为纯飞书链接（feishu.cn / larksuite.com）
