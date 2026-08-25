@@ -523,7 +523,10 @@ impl FeishuClient {
                                     MessageContent::Text(t)
                                 }
                             }
-                            None => continue,
+                            None => {
+                                tracing::debug!("飞书 WS: post 消息解析为空, raw_content={}", raw_msg.content);
+                                continue;
+                            }
                         }
                         "image"   => parse_image_content(&raw_msg.content),
                         "file"    => parse_file_content(&raw_msg.content),
@@ -1404,18 +1407,22 @@ fn parse_text_content(content: &str) -> Option<String> {
 
 /// 解析 post（富文本）消息，提取纯文本内容
 ///
-/// 飞书 post 消息格式：
-/// ```json
-/// {"zh_cn": {"title": "...", "content": [[{"tag":"text","text":"..."}, ...], ...]}}
-/// ```
+/// 飞书 post 消息有两种格式：
+/// 1. 带语言包裹：`{"zh_cn": {"title": "...", "content": [[...], ...]}}`
+/// 2. 直接结构：`{"title": "...", "content": [[...], ...]}` 
 /// 遍历所有段落和元素，提取 text/a 标签的文本，at 标签的用户名，段落间用换行分隔。
 fn parse_post_content(content: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(content).ok()?;
 
-    // post 内容按语言存储，优先 zh_cn，否则取第一个
-    let locale_obj = v.get("zh_cn")
-        .or_else(|| v.get("en_us"))
-        .or_else(|| v.as_object().and_then(|m| m.values().next()))?;
+    // 判断是哪种格式：如果顶层有 "content" 数组字段，就是直接结构
+    let locale_obj = if v.get("content").and_then(|c| c.as_array()).is_some() {
+        &v
+    } else {
+        // 带语言包裹的格式，优先 zh_cn
+        v.get("zh_cn")
+            .or_else(|| v.get("en_us"))
+            .or_else(|| v.as_object().and_then(|m| m.values().next()))?
+    };
 
     let title = locale_obj.get("title").and_then(|t| t.as_str()).unwrap_or("");
     let paragraphs = locale_obj.get("content").and_then(|c| c.as_array())?;
