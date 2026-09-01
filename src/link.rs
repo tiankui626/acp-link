@@ -369,27 +369,28 @@ async fn handle_message(state: Arc<SharedState>, msg: ImMessage) {
                         )
                         .await;
                     } else {
-                        // 仅当 session 已建立（即后续会走增量路径）时才入队。
-                        // 若 session 未建立，后续首条文字指令会触发 aggregate_topic
-                        // 从飞书 REST 拉全量历史，已包含该附件，无需再入队，否则会导致重复发送。
+                        // 非 actionable（纯附件等）消息：
+                        // - 若 session 已建立：说明对话已有上文，直接把附件作为增量
+                        //   prompt 投给 agent，让其结合上下文推断如何处理，无需再补文字指令。
+                        // - 若 session 未建立：无任何上文可推断，仅回提示；后续首条文字指令
+                        //   会触发 aggregate_topic 从飞书 REST 拉全量历史（已含该附件），
+                        //   故此处不入队，避免重复发送。
                         let has_session = state
                             .session_map
                             .read()
                             .await
                             .get_session_id(&thread_id)
                             .is_some();
-                        if has_session {
-                            if let Some(att) = pending_attachment_from(&msg) {
-                                state
-                                    .pending_attachments
-                                    .write()
-                                    .await
-                                    .entry(thread_id.clone())
-                                    .or_default()
-                                    .push(att);
-                            }
-                        }
-                        if let Err(e) = state
+                        if has_session && pending_attachment_from(&msg).is_some() {
+                            submit_to_acp_streaming(
+                                &state,
+                                &thread_id,
+                                &msg.chat_id,
+                                &msg.message_id,
+                                &msg,
+                            )
+                            .await;
+                        } else if let Err(e) = state
                             .channel
                             .reply_message(&msg.message_id, "收到附件，请回复文字指令来处理它")
                             .await
@@ -545,21 +546,30 @@ async fn prepare_prompt(
                 state.loaded_sessions.write().await.insert(sid.clone());
             }
             let session_id = sid;
+            // 当前消息：文本/链接取其内容；纯附件消息用引导语占位，
+            // 让 agent 结合上文自行推断如何处理该附件。
             let text = match &msg.content {
                 ImMessageContent::Text(t) => t.clone(),
                 ImMessageContent::Link { url } => url.clone(),
-                _ => anyhow::bail!("增量模式仅支持文本消息"),
+                _ if pending_attachment_from(msg).is_some() => {
+                    "[用户发来附件，请结合上文处理]".to_string()
+                }
+                _ => anyhow::bail!("增量模式仅支持文本、链接或附件消息"),
             };
             let context = format!(
                 "[im_context: message_id={}, chat_id={}]\n\n{}",
                 msg.message_id, msg.chat_id, text
             );
-            let pending = state
+            let mut pending = state
                 .pending_attachments
                 .write()
                 .await
                 .remove(thread_id)
                 .unwrap_or_default();
+            // 若当前消息本身就是附件，一并纳入本次处理
+            if let Some(att) = pending_attachment_from(msg) {
+                pending.push(att);
+            }
             if !pending.is_empty() {
                 tracing::info!(
                     "增量模式附带 {} 个待处理附件: thread={thread_id}",
