@@ -298,15 +298,45 @@ fn spawn_worker(
     Ok((cmd_tx, ready_rx))
 }
 
-/// 启动 keepalive worker 并等待其就绪（10 秒超时）
-async fn spawn_and_wait_keepalive(config: &BackendConfig) -> Result<mpsc::Sender<AcpCommand>> {
-    let (tx, ready_rx) = spawn_worker(usize::MAX, config)?;
-    match tokio::time::timeout(tokio::time::Duration::from_secs(10), ready_rx).await {
-        Err(_) => anyhow::bail!("keepalive worker 初始化超时"),
-        Ok(Err(_)) => anyhow::bail!("keepalive worker 已退出"),
-        Ok(Ok(Err(e))) => anyhow::bail!("keepalive worker 初始化失败: {e}"),
-        Ok(Ok(Ok(()))) => Ok(tx),
+/// 单个 worker 初始化的最大重试次数（含首次）。
+const MAX_INIT_RETRIES: u32 = 3;
+
+/// 启动一个 worker 并等待其就绪，超时/失败时按退避重试。
+///
+/// 相比直接 `bail`，重试能吸收 agent 冷启动（拉起运行时）导致的偶发超时，
+/// 避免整个进程退出后依赖外部拉起、并在启动阶段刷错误、遗留孤儿子进程。
+async fn spawn_worker_with_retry(
+    worker_id: usize,
+    config: &BackendConfig,
+    init_timeout: tokio::time::Duration,
+) -> Result<mpsc::Sender<AcpCommand>> {
+    let mut last_err = String::new();
+    for attempt in 1..=MAX_INIT_RETRIES {
+        let (tx, ready_rx) = spawn_worker(worker_id, config)?;
+        match tokio::time::timeout(init_timeout, ready_rx).await {
+            Ok(Ok(Ok(()))) => return Ok(tx),
+            Ok(Ok(Err(e))) => last_err = format!("初始化失败: {e}"),
+            Ok(Err(_)) => last_err = "工作线程已退出".to_string(),
+            Err(_) => last_err = format!("初始化超时({}s)", init_timeout.as_secs()),
+        }
+        // 释放本次失败的 sender（drop tx），worker 事件循环随 cmd_rx 关闭而退出
+        drop(tx);
+        if attempt < MAX_INIT_RETRIES {
+            let backoff = tokio::time::Duration::from_secs(u64::from(attempt) * 2);
+            tracing::warn!(
+                "[worker-{worker_id}] {last_err}，{}s 后重试 (attempt {attempt}/{MAX_INIT_RETRIES})",
+                backoff.as_secs()
+            );
+            tokio::time::sleep(backoff).await;
+        }
     }
+    anyhow::bail!("[worker-{worker_id}] {last_err}，已重试 {MAX_INIT_RETRIES} 次仍失败")
+}
+
+/// 启动 keepalive worker 并等待其就绪（带重试）
+async fn spawn_and_wait_keepalive(config: &BackendConfig) -> Result<mpsc::Sender<AcpCommand>> {
+    let init_timeout = tokio::time::Duration::from_secs(config.init_timeout_secs.max(1));
+    spawn_worker_with_retry(usize::MAX, config, init_timeout).await
 }
 
 /// 执行一次 keepalive 心跳：创建临时 session → 发送轻量 prompt → 消费响应
@@ -359,29 +389,23 @@ pub struct AcpBridge {
 impl AcpBridge {
     /// 启动 kiro-cli 进程池并建立 ACP 连接
     ///
-    /// 等待所有 worker 完成初始化（最多 10 秒），确保就绪后才返回。
+    /// 等待所有 worker 完成初始化（每个 worker 带重试），确保就绪后才返回。
+    ///
+    /// 单个 worker 初始化超时或失败时，最多重试 `MAX_INIT_RETRIES` 次，
+    /// 避免因 agent 冷启动偶发超时导致整个进程退出、依赖外部拉起。
     pub async fn start(config: &BackendConfig) -> Result<Self> {
         let pool_size = config.pool_size.max(1);
-        tracing::info!("启动 ACP 进程池: pool_size={pool_size}");
+        let init_timeout = tokio::time::Duration::from_secs(config.init_timeout_secs.max(1));
+        tracing::info!(
+            "启动 ACP 进程池: pool_size={pool_size}, init_timeout={}s",
+            init_timeout.as_secs()
+        );
 
         let mut workers = Vec::with_capacity(pool_size);
-        let mut ready_receivers = Vec::with_capacity(pool_size);
-
         for i in 0..pool_size {
-            let (tx, ready_rx) = spawn_worker(i, config)?;
+            let tx = spawn_worker_with_retry(i, config, init_timeout).await?;
             workers.push(Arc::new(Mutex::new(tx)));
-            ready_receivers.push((i, ready_rx));
-        }
-
-        for (i, ready_rx) in ready_receivers {
-            match tokio::time::timeout(tokio::time::Duration::from_secs(10), ready_rx).await {
-                Err(_) => anyhow::bail!("[worker-{i}] 初始化超时"),
-                Ok(Err(_)) => anyhow::bail!("[worker-{i}] 已退出（初始化失败）"),
-                Ok(Ok(Err(e))) => anyhow::bail!("[worker-{i}] 初始化失败: {e}"),
-                Ok(Ok(Ok(()))) => {
-                    tracing::info!("[worker-{i}] 初始化完成");
-                }
-            }
+            tracing::info!("[worker-{i}] 初始化完成");
         }
 
         let bridge = Self {
@@ -502,19 +526,11 @@ impl AcpBridge {
                     Ok(()) => return Ok(()),
                     Err(tokio::sync::mpsc::error::SendError(cmd)) => {
                         tracing::warn!("[worker-{idx}] 进程已崩溃，正在重启...");
-                        let (new_tx, ready_rx) = spawn_worker(idx, &self.config)?;
-                        match tokio::time::timeout(tokio::time::Duration::from_secs(10), ready_rx)
-                            .await
-                        {
-                            Err(_) => anyhow::bail!("[worker-{idx}] 重启超时"),
-                            Ok(Err(_)) => {
-                                anyhow::bail!("[worker-{idx}] 重启后工作线程已退出")
-                            }
-                            Ok(Ok(Err(e))) => {
-                                anyhow::bail!("[worker-{idx}] 重启初始化失败: {e}")
-                            }
-                            Ok(Ok(Ok(()))) => {}
-                        }
+                        let init_timeout = tokio::time::Duration::from_secs(
+                            self.config.init_timeout_secs.max(1),
+                        );
+                        let new_tx =
+                            spawn_worker_with_retry(idx, &self.config, init_timeout).await?;
                         *guard = new_tx;
                         guard
                             .send(cmd)
@@ -626,6 +642,7 @@ mod tests {
             cmd: "false".to_string(),
             args: vec![],
             pool_size,
+            init_timeout_secs: 60,
             cwd: None,
         };
         let workers = (0..pool_size)

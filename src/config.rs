@@ -67,12 +67,20 @@ pub struct BackendConfig {
     /// Agent 进程池大小，通过 thread_id hash 路由实现并行处理，默认为 4
     #[serde(default = "default_pool_size")]
     pub pool_size: usize,
+    /// 单个 worker 初始化（启动 agent 进程 + ACP 握手）的就绪超时秒数，默认 60。
+    /// kiro-cli 等 agent 冷启动需拉起运行时，10s 偏紧，故放宽并配合重试。
+    #[serde(default = "default_init_timeout_secs")]
+    pub init_timeout_secs: u64,
     /// Agent 工作目录，用作项目上下文路径；未配置时默认为 `~/.acp-link/temp/`
     pub cwd: Option<PathBuf>,
 }
 
 fn default_pool_size() -> usize {
     4
+}
+
+fn default_init_timeout_secs() -> u64 {
+    60
 }
 
 impl BackendConfig {
@@ -355,6 +363,39 @@ args = ["acp"]
 
         let config = AppConfig::load(&config_path).unwrap();
         assert_eq!(config.backend.pool_size, 4);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_default_init_timeout() {
+        let tmp = make_temp_dir();
+        let config_path = tmp.join("config.toml");
+        std::fs::write(&config_path, minimal_config_toml()).unwrap();
+
+        let config = AppConfig::load(&config_path).unwrap();
+        assert_eq!(config.backend.init_timeout_secs, 60);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_custom_init_timeout() {
+        let tmp = make_temp_dir();
+        let content = r#"
+[im.feishu]
+app_id = "x"
+app_secret = "y"
+
+[backend]
+cmd = "kiro"
+init_timeout_secs = 120
+"#;
+        let config_path = tmp.join("config.toml");
+        std::fs::write(&config_path, content).unwrap();
+
+        let config = AppConfig::load(&config_path).unwrap();
+        assert_eq!(config.backend.init_timeout_secs, 120);
 
         std::fs::remove_dir_all(&tmp).ok();
     }

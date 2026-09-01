@@ -32,6 +32,11 @@ args = ["acp", "--agent", "lark"]
 # 同一 topic 的消息始终路由到同一个 worker，保证 session 上下文连续
 # pool_size = 4
 
+# 单个 worker 初始化就绪的超时秒数（默认 60）
+# agent 冷启动需拉起运行时，超时后会自动重试（最多 3 次），
+# 全部失败才退出。若 agent 启动较慢可适当调大。
+# init_timeout_secs = 60
+
 # Agent 工作目录，用作项目上下文路径
 # 未配置时默认为 ~/.acp-link/temp/
 # cwd = "/path/to/your/project"
