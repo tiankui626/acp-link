@@ -74,6 +74,7 @@ log_level = "info"
 app_id = "cli_xxxxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 # group_only = false    # 为 true 时仅处理群聊消息（需 @机器人或在话题内），忽略所有私聊(p2p)消息（默认 false）
+# allowed_chats = ["oc_xxxxxxxx", "oc_yyyyyyyy"]  # 群聊白名单（chat_id）；非空时仅名单内群聊响应，为空/不填=不限制。仅作用于群聊
 
 [backend]
 cmd = "kiro-cli"

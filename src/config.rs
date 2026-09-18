@@ -33,6 +33,11 @@ pub struct FeishuConfig {
     /// 默认为 false，即同时支持群聊和私聊。
     #[serde(default)]
     pub group_only: bool,
+    /// 群聊白名单（chat_id 列表）。非空时，仅名单内的群聊才会响应 @/话题消息，
+    /// 其他群聊一律忽略；为空或不配置时不做限制（所有群聊均可用）。
+    /// 仅作用于群聊(group)，不影响私聊(p2p)。
+    #[serde(default)]
+    pub allowed_chats: Vec<String>,
 }
 
 /// IM 平台配置（互斥，只能配置一个平台）

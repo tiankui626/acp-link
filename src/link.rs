@@ -66,6 +66,8 @@ struct SharedState {
     inflight_streams: RwLock<HashMap<String, tokio::task::AbortHandle>>,
     /// 工作目录，传递给 ACP session
     cwd: PathBuf,
+    /// 群聊白名单（chat_id）。为空表示不限制；非空时仅名单内群聊响应。
+    allowed_chats: std::collections::HashSet<String>,
     /// Session 保留天数
     session_retention: u32,
     /// 资源文件保留天数
@@ -96,6 +98,17 @@ impl LinkService {
         let session_map = SessionMap::load(&sessions_path)?;
         let bridge = AcpBridge::start(&config.backend).await?;
         let cwd = config.backend.effective_cwd();
+
+        // 群聊白名单（当前仅飞书平台提供）；为空表示不限制。
+        let allowed_chats: std::collections::HashSet<String> = config
+            .im
+            .feishu
+            .as_ref()
+            .map(|f| f.allowed_chats.iter().cloned().collect())
+            .unwrap_or_default();
+        if !allowed_chats.is_empty() {
+            tracing::info!("群聊白名单已启用，{} 个群可响应", allowed_chats.len());
+        }
 
         // 启动内嵌 MCP HTTP Server
         let mcp_channel = channel.clone();
@@ -131,6 +144,7 @@ impl LinkService {
                 pending_attachments: RwLock::new(HashMap::new()),
                 inflight_streams: RwLock::new(HashMap::new()),
                 cwd,
+                allowed_chats,
                 session_retention: config.session_retention,
                 resource_retention: config.resource_retention,
                 log_retention: config.log_retention,
@@ -324,6 +338,17 @@ async fn handle_message(state: Arc<SharedState>, msg: ImMessage) {
     );
 
     let is_actionable = is_actionable_message(&msg);
+
+    // 群聊白名单：白名单非空时，仅名单内的群聊 chat_id 才响应，其他群聊一律忽略。
+    // 仅作用于群聊；私聊不受影响。方便运维收集群 id，此处对被拦群打 debug 日志。
+    if !chat_allowed(&msg.chat_type, &msg.chat_id, &state.allowed_chats) {
+        tracing::debug!(
+            "群聊不在白名单内，忽略: chat_id={} message_id={}",
+            msg.chat_id,
+            msg.message_id
+        );
+        return;
+    }
 
     // 群聊准入判断：区分「机器人已参与的话题」与「普通消息/回复」。
     // 详见 should_admit_group_message 的文档。
@@ -945,6 +970,23 @@ fn is_actionable_message(msg: &ImMessage) -> bool {
     )
 }
 
+/// 群聊白名单判断：决定某会话是否允许响应。
+///
+/// - 私聊(chat_type != "group")：不受白名单约束，始终允许（`true`）。
+/// - 群聊：
+///   * 白名单为空 → 不限制，允许（`true`），保持向后兼容。
+///   * 白名单非空 → 仅当 `chat_id` 在名单内才允许。
+fn chat_allowed(
+    chat_type: &str,
+    chat_id: &str,
+    allowed_chats: &std::collections::HashSet<String>,
+) -> bool {
+    if chat_type != "group" || allowed_chats.is_empty() {
+        return true;
+    }
+    allowed_chats.contains(chat_id)
+}
+
 /// 判断一条消息是否应被处理（群聊准入）。
 ///
 /// - 私聊(chat_type != "group")：始终放行（`true`）。
@@ -1092,6 +1134,35 @@ mod tests {
     }
 
     // ── detect_image_mime ────────────────────────────────────────────────────
+
+    // ── chat_allowed（群聊白名单）─────────────────────────────────────────────
+
+    #[test]
+    fn test_chat_allowed_p2p_ignores_whitelist() {
+        // 私聊不受白名单约束
+        let wl: std::collections::HashSet<String> = ["oc_a".to_string()].into_iter().collect();
+        assert!(chat_allowed("p2p", "oc_zzz", &wl));
+    }
+
+    #[test]
+    fn test_chat_allowed_empty_whitelist_allows_all_groups() {
+        // 空白名单 → 所有群聊放行（向后兼容）
+        let wl = std::collections::HashSet::new();
+        assert!(chat_allowed("group", "oc_anything", &wl));
+    }
+
+    #[test]
+    fn test_chat_allowed_group_in_whitelist() {
+        let wl: std::collections::HashSet<String> =
+            ["oc_a".to_string(), "oc_b".to_string()].into_iter().collect();
+        assert!(chat_allowed("group", "oc_a", &wl));
+    }
+
+    #[test]
+    fn test_chat_allowed_group_not_in_whitelist() {
+        let wl: std::collections::HashSet<String> = ["oc_a".to_string()].into_iter().collect();
+        assert!(!chat_allowed("group", "oc_other", &wl));
+    }
 
     // ── should_admit_group_message ───────────────────────────────────────────
 
