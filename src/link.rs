@@ -62,6 +62,8 @@ struct SharedState {
     loaded_sessions: RwLock<HashSet<String>>,
     /// 增量模式下每个 thread 尚未投递给 agent 的附件
     pending_attachments: RwLock<HashMap<String, Vec<PendingAttachment>>>,
+    /// 每个 thread 当前进行中的流式任务句柄，用于 /stop 取消
+    inflight_streams: RwLock<HashMap<String, tokio::task::AbortHandle>>,
     /// 工作目录，传递给 ACP session
     cwd: PathBuf,
     /// Session 保留天数
@@ -127,6 +129,7 @@ impl LinkService {
                 session_map: RwLock::new(session_map),
                 loaded_sessions: RwLock::new(HashSet::new()),
                 pending_attachments: RwLock::new(HashMap::new()),
+                inflight_streams: RwLock::new(HashMap::new()),
                 cwd,
                 session_retention: config.session_retention,
                 resource_retention: config.resource_retention,
@@ -359,6 +362,28 @@ async fn handle_message(state: Arc<SharedState>, msg: ImMessage) {
                 .map(str::to_owned);
             match thread_id {
                 Some(thread_id) => {
+                    // 优先拦截 /stop 命令：取消该 thread 进行中的流式任务
+                    if is_stop_command(&msg.content) {
+                        let aborted = {
+                            let mut map = state.inflight_streams.write().await;
+                            match map.remove(&thread_id) {
+                                Some(h) if !h.is_finished() => {
+                                    h.abort();
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        let hint = if aborted {
+                            "⏹ 已停止当前任务"
+                        } else {
+                            "当前没有进行中的任务"
+                        };
+                        if let Err(e) = state.channel.reply_message(&msg.message_id, hint).await {
+                            tracing::error!("回复 /stop 结果失败: {e}");
+                        }
+                        return;
+                    }
                     if is_actionable {
                         submit_to_acp_streaming(
                             &state,
@@ -504,14 +529,57 @@ async fn stream_acp_reply_prepared(
     reply_message_id: &str,
     blocks: Vec<ContentBlock>,
 ) {
-    match do_stream_prepared(state, routing_key, session_id, reply_message_id, blocks).await {
-        Ok(()) => {}
-        Err(e) => {
-            tracing::error!("流式处理失败: {e}");
-            let _ = state
-                .channel
-                .update_message(reply_message_id, &format!("处理失败: {e}"))
-                .await;
+    // 放入独立可 abort 的任务，按 thread 注册句柄，供 /stop 取消
+    let task_state = Arc::clone(state);
+    let routing_key_owned = routing_key.to_string();
+    let session_id_owned = session_id.to_string();
+    let reply_message_id_owned = reply_message_id.to_string();
+    let handle = tokio::spawn(async move {
+        match do_stream_prepared(
+            &task_state,
+            &routing_key_owned,
+            &session_id_owned,
+            &reply_message_id_owned,
+            blocks,
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::error!("流式处理失败: {e}");
+                let _ = task_state
+                    .channel
+                    .update_message(&reply_message_id_owned, &format!("处理失败: {e}"))
+                    .await;
+            }
+        }
+    });
+
+    // 注册 AbortHandle（覆盖同 thread 的旧句柄）
+    state
+        .inflight_streams
+        .write()
+        .await
+        .insert(routing_key.to_string(), handle.abort_handle());
+
+    // 等待任务结束（正常完成、出错或被 abort）
+    let join_result = handle.await;
+
+    // 仅当仍是本任务的句柄时才移除，避免误删后续新任务
+    {
+        let mut map = state.inflight_streams.write().await;
+        if let Some(h) = map.get(routing_key) {
+            if h.is_finished() {
+                map.remove(routing_key);
+            }
+        }
+    }
+
+    if let Err(e) = join_result {
+        if e.is_cancelled() {
+            tracing::info!("流式任务被取消 (/stop): thread={routing_key}");
+        } else {
+            tracing::error!("流式任务异常: {e}");
         }
     }
 }
@@ -854,6 +922,16 @@ fn is_actionable_message(msg: &ImMessage) -> bool {
         &msg.content,
         ImMessageContent::Text(_) | ImMessageContent::Link { .. }
     )
+}
+
+/// 判断是否为停止命令：/stop、/取消、/停止（忽略首尾空白，大小写不敏感）
+fn is_stop_command(content: &ImMessageContent) -> bool {
+    if let ImMessageContent::Text(t) = content {
+        let s = t.trim().to_lowercase();
+        matches!(s.as_str(), "/stop" | "/取消" | "/停止")
+    } else {
+        false
+    }
 }
 
 /// 将非 actionable 消息抽取为 pending 附件；不支持的类型返回 None
