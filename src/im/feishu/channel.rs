@@ -134,6 +134,7 @@ fn convert_message(msg: FeishuMessage) -> ImMessage {
         content: convert_content(msg.content),
         timestamp: msg.timestamp,
         topic_id: msg.root_id,
+        mentioned_bot: msg.mentioned_bot,
     }
 }
 

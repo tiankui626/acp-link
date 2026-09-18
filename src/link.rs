@@ -325,6 +325,27 @@ async fn handle_message(state: Arc<SharedState>, msg: ImMessage) {
 
     let is_actionable = is_actionable_message(&msg);
 
+    // 群聊准入判断：区分「机器人已参与的话题」与「普通消息/回复」。
+    // 详见 should_admit_group_message 的文档。
+    if msg.chat_type == "group" && !msg.mentioned_bot {
+        let in_known_topic = match &msg.topic_id {
+            Some(root_id) => state
+                .session_map
+                .read()
+                .await
+                .get_topic_id(root_id)
+                .is_some(),
+            None => false,
+        };
+        if !should_admit_group_message(&msg.chat_type, msg.mentioned_bot, in_known_topic) {
+            tracing::debug!(
+                "群聊消息未 @机器人且不在已知话题内，忽略: {}",
+                msg.message_id
+            );
+            return;
+        }
+    }
+
     match &msg.topic_id {
         None => {
             let is_link = matches!(&msg.content, ImMessageContent::Link { .. });
@@ -924,6 +945,26 @@ fn is_actionable_message(msg: &ImMessage) -> bool {
     )
 }
 
+/// 判断一条消息是否应被处理（群聊准入）。
+///
+/// - 私聊(chat_type != "group")：始终放行（`true`）。
+/// - 群聊：
+///   * 已 @机器人 → 放行。
+///   * 未 @机器人但处于机器人已参与的话题内（`in_known_topic`）→ 放行，
+///     实现「话题内自由对话，无需每条都 @」。
+///   * 未 @机器人且不在已知话题内 → 拒绝（`false`）。
+///
+/// `in_known_topic` 应由调用方用 `SessionMap::get_topic_id(root_id)` 是否命中来提供。
+/// 之所以用 session_map 判定而非 root_id 是否非空：飞书 root_id 是回复链根消息 id，
+/// 用户普通「回复」任意消息都会带上，与机器人参与的真实话题(omt_)无关；只有 session_map
+/// 里存在映射，才说明机器人确实在这个话题中。
+fn should_admit_group_message(chat_type: &str, mentioned_bot: bool, in_known_topic: bool) -> bool {
+    if chat_type != "group" {
+        return true;
+    }
+    mentioned_bot || in_known_topic
+}
+
 /// 判断是否为停止命令：/stop、/取消、/停止（忽略首尾空白，大小写不敏感）
 fn is_stop_command(content: &ImMessageContent) -> bool {
     if let ImMessageContent::Text(t) = content {
@@ -1046,10 +1087,41 @@ mod tests {
             content,
             timestamp: 0,
             topic_id: None,
+            mentioned_bot: false,
         }
     }
 
     // ── detect_image_mime ────────────────────────────────────────────────────
+
+    // ── should_admit_group_message ───────────────────────────────────────────
+
+    #[test]
+    fn test_admit_p2p_always() {
+        // 私聊无论是否 @、是否在话题内，都放行
+        assert!(should_admit_group_message("p2p", false, false));
+        assert!(should_admit_group_message("p2p", false, true));
+        assert!(should_admit_group_message("p2p", true, false));
+    }
+
+    #[test]
+    fn test_admit_group_mentioned() {
+        // 群聊 @了机器人 → 放行（无论是否在已知话题）
+        assert!(should_admit_group_message("group", true, false));
+        assert!(should_admit_group_message("group", true, true));
+    }
+
+    #[test]
+    fn test_admit_group_in_known_topic_without_mention() {
+        // 群聊未 @，但在机器人已参与的话题内 → 放行（话题内自由对话）
+        assert!(should_admit_group_message("group", false, true));
+    }
+
+    #[test]
+    fn test_reject_group_unmentioned_not_in_topic() {
+        // 回归测试：群聊未 @ 且不在已知话题内（如仅回复了一条普通消息）→ 拒绝。
+        // 这正是此前用 root_id 误判导致误触发的 bug 场景。
+        assert!(!should_admit_group_message("group", false, false));
+    }
 
     #[test]
     fn test_detect_image_mime_png() {

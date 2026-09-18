@@ -207,6 +207,8 @@ pub struct FeishuMessage {
     pub timestamp: u64,
     /// Thread 根消息 ID（非空表示该消息在 Thread 内）
     pub root_id: Option<String>,
+    /// 该消息是否 @ 了机器人（群聊 @判定的结果，由传输层计算，供上层决策）
+    pub mentioned_bot: bool,
 }
 
 /// Thread 聚合提交结果
@@ -493,22 +495,16 @@ impl FeishuClient {
                         continue;
                     }
 
-                    // 群聊须 @机器人：用 mention 的 open_id 与机器人自身 open_id 比对。
+                    // 群聊「是否 @ 机器人」判定：用 mention 的 open_id 与机器人自身 open_id 比对。
                     // 不能用「mention 无 user_id」判定——应用未申请通讯录(user_id)权限时，
                     // 普通用户的 mention 同样没有 user_id，会被误判为 @机器人。
-                    // 例外：如果消息在话题（thread）内（root_id 非空），则无需 @机器人，
-                    // 允许话题内的自由对话。
-                    let in_thread = raw_msg.root_id.as_ref().map_or(false, |s| !s.is_empty());
-                    if raw_msg.chat_type == "group"
-                        && !in_thread
-                        && !mentions_bot(&raw_msg.mentions, &bot_open_id)
-                    {
-                        tracing::debug!(
-                            "飞书 WS: 群聊消息未@机器人，跳过 {}",
-                            raw_msg.message_id
-                        );
-                        continue;
-                    }
+                    //
+                    // 注意：此处只计算结果，不在传输层直接丢弃群聊消息。是否要求 @ 由上层
+                    // (link 层) 结合 session_map 决策：机器人已参与的话题内免 @，否则要求 @。
+                    // 不能用 root_id 是否非空判定「是否在话题内」——飞书 root_id 是回复链根消息 id
+                    // (om_ 前缀)，用户普通「回复」任意消息都会带上，与真正的话题(omt_)无关，
+                    // 早期用它判定会导致「回复一条未 @ 的消息即误触发」。
+                    let mentioned_bot = mentions_bot(&raw_msg.mentions, &bot_open_id);
 
                     let content = match raw_msg.message_type.as_str() {
                         "text" => match parse_text_content(&raw_msg.content) {
@@ -569,6 +565,7 @@ impl FeishuClient {
                         content,
                         timestamp,
                         root_id,
+                        mentioned_bot,
                     };
 
                     tracing::debug!("飞书 WS: 收到消息 chat_id={}", feishu_msg.chat_id);

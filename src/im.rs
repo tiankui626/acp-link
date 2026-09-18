@@ -38,6 +38,8 @@ pub struct ImMessage {
     pub timestamp: u64,
     /// Topic ID（对应飞书 thread_id 等平台概念）
     pub topic_id: Option<String>,
+    /// 该消息是否 @ 了机器人（平台无关；私聊等无 @概念场景恒为 false）
+    pub mentioned_bot: bool,
 }
 
 /// 跨平台统一消息内容
