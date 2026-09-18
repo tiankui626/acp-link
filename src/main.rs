@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
         Arc::new(acp_link::im::FeishuChannel::new(
             &feishu.app_id,
             &feishu.app_secret,
+            feishu.group_only,
         ))
     } else {
         anyhow::bail!("未配置 IM 平台，请在 [im.feishu] 中填写配置")

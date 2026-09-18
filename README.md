@@ -73,6 +73,7 @@ log_level = "info"
 [im.feishu]
 app_id = "cli_xxxxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# group_only = false    # 为 true 时仅处理群聊消息（需 @机器人或在话题内），忽略所有私聊(p2p)消息（默认 false）
 
 [backend]
 cmd = "kiro-cli"

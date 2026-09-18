@@ -328,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_unknown_tool_returns_error() {
-        let client = FeishuClient::new("id", "secret");
+        let client = FeishuClient::new("id", "secret", false);
         let result = call("nonexistent_tool", &json!({}), &client).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unknown tool"));

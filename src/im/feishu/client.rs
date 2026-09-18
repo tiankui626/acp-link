@@ -277,11 +277,13 @@ pub struct FeishuClient {
     seen_ids: Arc<RwLock<HashMap<String, Instant>>>,
     /// 缓存的机器人自身 open_id（用于群聊「是否 @ 了机器人」判定）
     bot_open_id: Arc<RwLock<Option<String>>>,
+    /// 为 true 时仅处理群聊消息，忽略私聊(p2p)
+    group_only: bool,
 }
 
 impl FeishuClient {
     /// 创建飞书客户端
-    pub fn new(app_id: &str, app_secret: &str) -> Self {
+    pub fn new(app_id: &str, app_secret: &str, group_only: bool) -> Self {
         Self {
             app_id: app_id.to_owned(),
             app_secret: app_secret.to_owned(),
@@ -289,6 +291,7 @@ impl FeishuClient {
             tenant_token: Arc::new(RwLock::new(None)),
             seen_ids: Arc::new(RwLock::new(HashMap::new())),
             bot_open_id: Arc::new(RwLock::new(None)),
+            group_only,
         }
     }
 
@@ -479,6 +482,15 @@ impl FeishuClient {
                             continue;
                         }
                         seen.insert(raw_msg.message_id.clone(), now);
+                    }
+
+                    // group_only 模式：忽略所有私聊(p2p)消息，仅处理群聊。
+                    if self.group_only && raw_msg.chat_type == "p2p" {
+                        tracing::debug!(
+                            "飞书 WS: group_only 模式，忽略私聊消息 {}",
+                            raw_msg.message_id
+                        );
+                        continue;
                     }
 
                     // 群聊须 @机器人：用 mention 的 open_id 与机器人自身 open_id 比对。

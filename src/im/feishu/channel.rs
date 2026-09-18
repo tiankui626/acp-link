@@ -25,9 +25,9 @@ pub struct FeishuChannel {
 }
 
 impl FeishuChannel {
-    pub fn new(app_id: &str, app_secret: &str) -> Self {
+    pub fn new(app_id: &str, app_secret: &str, group_only: bool) -> Self {
         Self {
-            client: FeishuClient::new(app_id, app_secret),
+            client: FeishuClient::new(app_id, app_secret, group_only),
         }
     }
 }

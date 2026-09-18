@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
+    /// 为 true 时仅处理群聊消息（需 @机器人或在话题内），忽略所有私聊(p2p)消息。
+    /// 默认为 false，即同时支持群聊和私聊。
+    #[serde(default)]
+    pub group_only: bool,
 }
 
 /// IM 平台配置（互斥，只能配置一个平台）
@@ -201,6 +205,7 @@ impl AppConfig {
 [im.feishu]
 app_id = "YOUR_APP_ID"
 app_secret = "YOUR_APP_SECRET"
+# group_only = false   # 为 true 时仅处理群聊消息（需 @机器人或在话题内），忽略私聊
 
 [backend]
 cmd = "kiro-cli"

@@ -237,7 +237,7 @@ mod tests {
 
     fn test_state() -> McpState {
         use crate::im::FeishuChannel;
-        let channel = FeishuChannel::new("test_id", "test_secret");
+        let channel = FeishuChannel::new("test_id", "test_secret", false);
         McpState {
             channel: Arc::new(channel),
             session_id: RwLock::new(None),
